@@ -120,6 +120,7 @@ def train_test_split_tensors(X, y, train_size=0.8, batch_size=32):
     return train_dataloader, test_dataloader
 
 def get_accuracy(model, train_dataloader, val_dataloader, device):
+    model.eval()
     result = dict()
     for mode, loader in [("train", train_dataloader), ("val", val_dataloader)]:
         corrects = 0
@@ -131,9 +132,13 @@ def get_accuracy(model, train_dataloader, val_dataloader, device):
                 outputs = model(sequences)
                 _, preds = torch.max(outputs, dim=1)
                 total += labels.shape[0]
-                corrects += int(sum(preds == labels))
-
+                corrects += int(sum(preds == labels))        
+                
         result[mode] = round(corrects/total, 4) * 100
+        
+    print(f"Training Accuracy: {result['train']}")
+    print(f"Validation Accuracy: {result['val']}")
+    print("-----------")
         
     return result
 
@@ -143,6 +148,7 @@ def train_model(n_epochs, model, train_dataloader, test_dataloader, loss, optimi
     train_acc_list = []
     val_acc_list = []
     for epoch in tqdm(range(n_epochs)):
+        model.train()
         
         # train
         cummulative_loss = 0
@@ -178,9 +184,10 @@ def train_model(n_epochs, model, train_dataloader, test_dataloader, loss, optimi
             
         loss_per_epoch_val = cummulative_loss_val / n_batches_val
         val_loss_list.append(loss_per_epoch_val)
-
+        
         acc = get_accuracy(model, train_dataloader, test_dataloader, device)
         train_acc_list.append(acc["train"])
         val_acc_list.append(acc["val"])
 
     return train_acc_list, val_acc_list, train_loss_list, val_loss_list
+
