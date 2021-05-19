@@ -11,6 +11,8 @@ def train_model(n_epochs, model, train_dataloader, test_dataloader, loss, optimi
     for epoch in tqdm(range(n_epochs)):
         
         # train
+        model.train()
+        
         cummulative_loss = 0
         n_batches = 0
         for sequences, labels in train_dataloader:
@@ -32,6 +34,8 @@ def train_model(n_epochs, model, train_dataloader, test_dataloader, loss, optimi
         train_loss_list.append(loss_per_epoch)
         
         # val
+        model.eval()
+        
         cummulative_loss_val = 0
         n_batches_val = 0
         for sequences, labels in test_dataloader:    
