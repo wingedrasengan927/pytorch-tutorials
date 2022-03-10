@@ -3,10 +3,12 @@ import numpy as np
 import os
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+from tqdm import tqdm
 
 import torch
 from torchvision import ops
 import torch.nn.functional as F
+import torch.optim as optim
 
 def get_req_output(model_output, n_anchors, indices_all):
     batch_size = model_output.size(dim=0)
@@ -102,12 +104,12 @@ def calc_gt_offsets(pos_anc_coords, gt_bbox_mapping):
     return torch.stack([tx_, ty_, tw_, th_], dim=-1)
 
 # loss helper functions
-def calc_cls_loss(cls_scores_pos, cls_scores_neg):
-    target_pos = torch.ones_like(cls_scores_pos)
-    target_neg = torch.zeros_like(cls_scores_neg)
+def calc_conf_loss(conf_scores_pos, conf_scores_neg):
+    target_pos = torch.ones_like(conf_scores_pos)
+    target_neg = torch.zeros_like(conf_scores_neg)
     
     target = torch.cat((target_pos, target_neg))
-    inputs = torch.cat((cls_scores_pos, cls_scores_neg))
+    inputs = torch.cat((conf_scores_pos, conf_scores_neg))
     
     loss = F.binary_cross_entropy_with_logits(inputs, target)
     
@@ -149,29 +151,26 @@ def project_bboxes(bboxes, width_scale_factor, height_scale_factor, mode='a2p'):
     
     return proj_bboxes
 
-def generate_proposals(anchors_list, offsets_list):
+def generate_proposals(anchors, offsets):
     
-    proposals_list = []
-    
-    for anchors, offsets in zip(anchors_list, offsets_list):
+    # flatten anchors and offsets
+    anchors_flat = anchors.flatten(start_dim=1, end_dim=-2)
+    offsets_flat = offsets.flatten(start_dim=1, end_dim=-2)
    
-        # change anchor boxes format
-        anchors = ops.box_convert(anchors, in_fmt='xyxy', out_fmt='cxcywh')
+    # change format of the anchor boxes from 'xyxy' to 'cxcywh'
+    anchors_flat = ops.box_convert(anchors_flat, in_fmt='xyxy', out_fmt='cxcywh')
 
-        # generate proposals
-        proposals = torch.zeros_like(anchors)
-        proposals[:, 0] = anchors[:, 0] + offsets[:, 0] * anchors[:, 2]
-        proposals[:, 1] = anchors[:, 1] + offsets[:, 1] * anchors[:, 3]
-        proposals[:, 2] = anchors[:, 2] * torch.exp(offsets[:, 2])
-        proposals[:, 3] = anchors[:, 3] * torch.exp(offsets[:, 3])
+    # apply offsets to anchors to create proposals
+    proposals_ = torch.zeros_like(anchors_flat)
+    proposals_[:,:,0] = anchors_flat[:,:,0] + offsets_flat[:,:,0]*anchors_flat[:,:,2]
+    proposals_[:,:,1] = anchors_flat[:,:,1] + offsets_flat[:,:,1]*anchors_flat[:,:,3]
+    proposals_[:,:,2] = anchors_flat[:,:,2] * torch.exp(offsets_flat[:,:,2])
+    proposals_[:,:,3] = anchors_flat[:,:,3] * torch.exp(offsets_flat[:,:,3])
 
-        # change proposals format
-        proposals = ops.box_convert(proposals, in_fmt='cxcywh', out_fmt='xyxy')
-        
-        proposals_list.append(proposals)
-    
-    return proposals_list
-    
+    # change format of proposals back from 'cxcywh' to 'xyxy'
+    proposals = ops.box_convert(proposals_, in_fmt='cxcywh', out_fmt='xyxy')
+
+    return proposals
 
 def gen_anc_base(anc_pts_x, anc_pts_y, anc_scales, anc_ratios, out_size):
     n_anc_boxes = len(anc_scales) * len(anc_ratios)
@@ -199,7 +198,7 @@ def gen_anc_base(anc_pts_x, anc_pts_y, anc_scales, anc_ratios, out_size):
             
     return anc_base
 
-def get_req_anchors(anc_boxes_all, gt_bboxes_all, batch_size, pos_thresh, neg_thresh):
+def get_req_anchors(batch_size, anc_boxes_all, gt_bboxes_all, pos_thresh, neg_thresh):
     
     # flatten anchor boxes
     anc_boxes_flat = anc_boxes_all.reshape(batch_size, -1, 4)
@@ -211,7 +210,6 @@ def get_req_anchors(anc_boxes_all, gt_bboxes_all, batch_size, pos_thresh, neg_th
 
     pos_anc_ind_all = [] # positive anchor indices for all the images
     neg_anc_ind_all = [] # negative anchor indices for all the images
-    pos_anc_coords_all = []
 
     # compute IoU of the anc boxes with the gt boxes for all the images
     for i in range(batch_size):
@@ -233,15 +231,11 @@ def get_req_anchors(anc_boxes_all, gt_bboxes_all, batch_size, pos_thresh, neg_th
         # sample -ve anchors to avoid data imbalance
         neg_anc_ind_sample = neg_anc_ind[torch.randint(0, neg_anc_ind.shape[0], \
                                                           (pos_anc_ind.shape[0],))]
-        
-        # get positive anchor coords
-        pos_anc_coords = anc_boxes[pos_anc_ind]
 
         pos_anc_ind_all.append(pos_anc_ind)
         neg_anc_ind_all.append(neg_anc_ind_sample)
-        pos_anc_coords_all.append(pos_anc_coords)
         
-    return pos_anc_ind_all, neg_anc_ind_all, ious_all, pos_anc_coords_all
+    return pos_anc_ind_all, neg_anc_ind_all, ious_all
 
 def map_gt(batch_size, pos_anc_ind_all, gt_bboxes_all, gt_classes_all, ious_all):
     # map each positive anchor box to its corresponding ground truth box
@@ -262,6 +256,35 @@ def map_gt(batch_size, pos_anc_ind_all, gt_bboxes_all, gt_classes_all, ious_all)
         gt_classes_mapping_all.append(gt_classes_mapping)
         
     return gt_bbox_mapping_all, gt_classes_mapping_all
+
+# training functions
+def training_loop(model, learning_rate, train_dataloader, n_epochs):
+    
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    
+    model.train()
+    loss_list = []
+    
+    for i in tqdm(range(n_epochs)):
+        total_loss = 0
+        n_batches = 0
+        for img_batch, gt_bboxes_batch, gt_classes_batch in train_dataloader:
+            
+            # forward pass
+            loss = model(img_batch, gt_bboxes_batch, gt_classes_batch)
+            
+            # backpropagation
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            total_loss += loss.item()
+            n_batches += 1
+        
+        loss_per_batch = total_loss / n_batches
+        loss_list.append(loss_per_batch)
+        
+    return loss_list
 
 # plotting helper functions
 def display_img(img_data, fig, axes):
