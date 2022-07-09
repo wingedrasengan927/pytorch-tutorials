@@ -249,7 +249,7 @@ class MultiHeadedAttention(nn.Module):
             for lin_layer, x in zip(self.linear_layers, (query, key, value))
         ]
 
-        # 2) Apply self-attention on all the projected multi-head tensors in batch
+        # 2) Apply attention on all the projected multi-head tensors in batch
         x, self.attn = attention(query, key, value, mask=mask, dropout=self.dropout)
 
         # 3) Concat all the heads using a view
