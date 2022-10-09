@@ -10,27 +10,7 @@ from torchvision import ops
 import torch.nn.functional as F
 import torch.optim as optim
 
-def get_req_output(model_output, n_anchors, indices_all):
-    batch_size = model_output.size(dim=0)
-    model_output_flat = flatten_model_output(model_output, n_anchors)
-    
-    req_output = []
-    for i in range(batch_size):
-        indices = indices_all[i]
-        model_output_i = model_output_flat[i]
-        
-        req_output.append(model_output_i[indices])
-        
-    return req_output
-        
-def flatten_model_output(model_output, n_anchors):
-    B, _, Hmap, Wmap = model_output.size()
-    # reshape as [batch_size, n_anchors, (score or offsets), height, width]
-    flat_model_output = model_output.reshape(B, n_anchors, -1, Hmap, Wmap) 
-    
-    B, A, D, H, W = flat_model_output.shape
-    flat_model_output = flat_model_output.permute(0, 1, 3, 4, 2).contiguous().view(B, -1, D)
-    return flat_model_output
+# -------------- Data Untils -------------------
 
 def parse_annotation(annotation_path, img_size):
     '''
@@ -75,19 +55,8 @@ def parse_annotation(annotation_path, img_size):
                 
     return torch.Tensor(groundtruth_boxes), img_path, groundtruth_classes
 
-def calc_gt_offsets_all(batch_size, pos_anc_ind_all, gt_bbox_mapping_all, anc_boxes_all):
-    gt_offsets_pos = []
-    anc_boxes_flat = anc_boxes_all.flatten(start_dim=1, end_dim=-2)
-    
-    for i in range(batch_size):
-        pos_anc_ind = pos_anc_ind_all[i]
-        pos_anc_coords = anc_boxes_flat[i][pos_anc_ind]
-        gt_bbox_mapping = gt_bbox_mapping_all[i]
-        
-        gt_offsets = calc_gt_offsets(pos_anc_coords, gt_bbox_mapping)
-        gt_offsets_pos.append(gt_offsets)
-        
-    return torch.cat(gt_offsets_pos)
+# -------------- Prepocessing utils ----------------
+
 
 def calc_gt_offsets(pos_anc_coords, gt_bbox_mapping):
     pos_anc_coords = ops.box_convert(pos_anc_coords, in_fmt='xyxy', out_fmt='cxcywh')
@@ -103,24 +72,6 @@ def calc_gt_offsets(pos_anc_coords, gt_bbox_mapping):
 
     return torch.stack([tx_, ty_, tw_, th_], dim=-1)
 
-# loss helper functions
-def calc_conf_loss(conf_scores_pos, conf_scores_neg):
-    target_pos = torch.ones_like(conf_scores_pos)
-    target_neg = torch.zeros_like(conf_scores_neg)
-    
-    target = torch.cat((target_pos, target_neg))
-    inputs = torch.cat((conf_scores_pos, conf_scores_neg))
-    
-    loss = F.binary_cross_entropy_with_logits(inputs, target)
-    
-    return loss
-
-def calc_bbox_reg_loss(gt_offsets, reg_offsets_pos):
-    assert gt_offsets.size() == reg_offsets_pos.size()
-    loss = F.smooth_l1_loss(reg_offsets_pos, gt_offsets) 
-    return loss
-
-# anchors helper functions
 def gen_anc_centers(out_size):
     out_h, out_w = out_size
     
@@ -152,20 +103,16 @@ def project_bboxes(bboxes, width_scale_factor, height_scale_factor, mode='a2p'):
     return proj_bboxes
 
 def generate_proposals(anchors, offsets):
-    
-    # flatten anchors and offsets
-    anchors_flat = anchors.flatten(start_dim=1, end_dim=-2)
-    offsets_flat = offsets.flatten(start_dim=1, end_dim=-2)
    
     # change format of the anchor boxes from 'xyxy' to 'cxcywh'
-    anchors_flat = ops.box_convert(anchors_flat, in_fmt='xyxy', out_fmt='cxcywh')
+    anchors = ops.box_convert(anchors, in_fmt='xyxy', out_fmt='cxcywh')
 
     # apply offsets to anchors to create proposals
-    proposals_ = torch.zeros_like(anchors_flat)
-    proposals_[:,:,0] = anchors_flat[:,:,0] + offsets_flat[:,:,0]*anchors_flat[:,:,2]
-    proposals_[:,:,1] = anchors_flat[:,:,1] + offsets_flat[:,:,1]*anchors_flat[:,:,3]
-    proposals_[:,:,2] = anchors_flat[:,:,2] * torch.exp(offsets_flat[:,:,2])
-    proposals_[:,:,3] = anchors_flat[:,:,3] * torch.exp(offsets_flat[:,:,3])
+    proposals_ = torch.zeros_like(anchors)
+    proposals_[:,0] = anchors[:,0] + offsets[:,0]*anchors[:,2]
+    proposals_[:,1] = anchors[:,1] + offsets[:,1]*anchors[:,3]
+    proposals_[:,2] = anchors[:,2] * torch.exp(offsets[:,2])
+    proposals_[:,3] = anchors[:,3] * torch.exp(offsets[:,3])
 
     # change format of proposals back from 'cxcywh' to 'xyxy'
     proposals = ops.box_convert(proposals_, in_fmt='cxcywh', out_fmt='xyxy')
@@ -198,7 +145,7 @@ def gen_anc_base(anc_pts_x, anc_pts_y, anc_scales, anc_ratios, out_size):
             
     return anc_base
 
-def get_req_anchors(batch_size, anc_boxes_all, gt_bboxes_all, pos_thresh, neg_thresh):
+def get_iou_mat(batch_size, anc_boxes_all, gt_bboxes_all):
     
     # flatten anchor boxes
     anc_boxes_flat = anc_boxes_all.reshape(batch_size, -1, 4)
@@ -206,87 +153,94 @@ def get_req_anchors(batch_size, anc_boxes_all, gt_bboxes_all, pos_thresh, neg_th
     tot_anc_boxes = anc_boxes_flat.size(dim=1)
     
     # create a placeholder to compute IoUs amongst the boxes
-    ious_all = torch.zeros((batch_size, tot_anc_boxes, gt_bboxes_all.size(dim=1)))
-
-    pos_anc_ind_all = [] # positive anchor indices for all the images
-    neg_anc_ind_all = [] # negative anchor indices for all the images
+    ious_mat = torch.zeros((batch_size, tot_anc_boxes, gt_bboxes_all.size(dim=1)))
 
     # compute IoU of the anc boxes with the gt boxes for all the images
     for i in range(batch_size):
         gt_bboxes = gt_bboxes_all[i]
         anc_boxes = anc_boxes_flat[i]
-        ious_all[i, :] = ops.box_iou(anc_boxes, gt_bboxes)
-
-        # get positive anchor indices
-        pos_anc_ind_a = ious_all[i, :].argmax(dim=0) # condition 1
-        pos_anc_ind_a = pos_anc_ind_a[pos_anc_ind_a != 0]
-        pos_anc_ind_b = torch.where(ious_all[i, :] > pos_thresh)[0] # condition 2
-        # combine condition 1 & 2
-        pos_anc_ind = torch.unique(torch.cat((pos_anc_ind_a, pos_anc_ind_b)))
-
-        # get negative anchor indices
-        neg_anc_ind = torch.all((ious_all[i, :] < neg_thresh) & (ious_all[i, :] >= 0), dim=1)
-        neg_anc_ind = torch.where(neg_anc_ind)[0]
-
-        # sample -ve anchors to avoid data imbalance
-        neg_anc_ind_sample = neg_anc_ind[torch.randint(0, neg_anc_ind.shape[0], \
-                                                          (pos_anc_ind.shape[0],))]
-
-        pos_anc_ind_all.append(pos_anc_ind)
-        neg_anc_ind_all.append(neg_anc_ind_sample)
+        ious_mat[i, :] = ops.box_iou(anc_boxes, gt_bboxes)
         
-    return pos_anc_ind_all, neg_anc_ind_all, ious_all
+    return ious_mat
 
-def map_gt(batch_size, pos_anc_ind_all, gt_bboxes_all, gt_classes_all, ious_all):
-    # map each positive anchor box to its corresponding ground truth box
-    gt_bbox_mapping_all = []
-    gt_classes_mapping_all = []
+def get_req_anchors(anc_boxes_all, gt_bboxes_all, gt_classes_all, pos_thresh=0.7, neg_thresh=0.2):
     
-    for i in range(batch_size):
-        gt_bboxes = gt_bboxes_all[i]
-        gt_classes = gt_classes_all[i]
-        
-        pos_anc_ind = pos_anc_ind_all[i]
-        gt_bbox_mapping_idx = ious_all[i, :][pos_anc_ind].argmax(dim=1)
-        
-        gt_bbox_mapping = torch.Tensor([gt_bboxes[k].tolist() for k in gt_bbox_mapping_idx])
-        gt_classes_mapping = torch.Tensor([gt_classes[k] for k in gt_bbox_mapping_idx])
-
-        gt_bbox_mapping_all.append(gt_bbox_mapping)
-        gt_classes_mapping_all.append(gt_classes_mapping)
-        
-    return gt_bbox_mapping_all, gt_classes_mapping_all
-
-# training functions
-def training_loop(model, learning_rate, train_dataloader, n_epochs):
+    # get the size and shape parameters
+    B, w_amap, h_amap, A, _ = anc_boxes_all.shape
+    N = gt_bboxes_all.shape[1] # max number of groundtruth bboxes in a batch
     
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    # get total number of anchor boxes in a single image
+    tot_anc_boxes = A * w_amap * h_amap
     
-    model.train()
-    loss_list = []
+    # get the iou matrix which contains iou of every anchor box
+    # against all the groundtruth bboxes in an image
+    iou_mat = get_iou_mat(B, anc_boxes_all, gt_bboxes_all)
     
-    for i in tqdm(range(n_epochs)):
-        total_loss = 0
-        n_batches = 0
-        for img_batch, gt_bboxes_batch, gt_classes_batch in train_dataloader:
-            
-            # forward pass
-            loss = model(img_batch, gt_bboxes_batch, gt_classes_batch)
-            
-            # backpropagation
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            
-            total_loss += loss.item()
-            n_batches += 1
-        
-        loss_per_batch = total_loss / n_batches
-        loss_list.append(loss_per_batch)
-        
-    return loss_list
+    # for every groundtruth bbox in an image, find the iou 
+    # with the anchor box which it overlaps the most
+    max_iou_per_gt_box, _ = iou_mat.max(dim=1, keepdim=True)
+    
+    # get positive anchor boxes
+    
+    # condition 1: the anchor box with the max iou for every gt bbox
+    positive_anc_mask = torch.logical_and(iou_mat == max_iou_per_gt_box, max_iou_per_gt_box > 0) 
+    # condition 2: anchor boxes with iou above a threshold with any of the gt bboxes
+    positive_anc_mask = torch.logical_or(positive_anc_mask, iou_mat > pos_thresh)
+    
+    positive_anc_ind_sep = torch.where(positive_anc_mask)[0] # get separate indices in the batch
+    # combine all the batches and get the idxs of the +ve anchor boxes
+    positive_anc_mask = positive_anc_mask.flatten(start_dim=0, end_dim=1)
+    positive_anc_ind = torch.where(positive_anc_mask)[0]
+    
+    # for every anchor box, get the iou and the idx of the
+    # gt bbox it overlaps with the most
+    max_iou_per_anc, max_iou_per_anc_ind = iou_mat.max(dim=-1)
+    max_iou_per_anc = max_iou_per_anc.flatten(start_dim=0, end_dim=1)
+    
+    # get iou scores of the +ve anchor boxes
+    GT_conf_scores = max_iou_per_anc[positive_anc_ind]
+    
+    # get gt classes of the +ve anchor boxes
+    
+    # expand gt classes to map against every anchor box
+    gt_classes_expand = gt_classes_all.view(B, 1, N).expand(B, tot_anc_boxes, N)
+    # for every anchor box, consider only the class of the gt bbox it overlaps with the most
+    GT_class = torch.gather(gt_classes_expand, -1, max_iou_per_anc_ind.unsqueeze(-1)).squeeze(-1)
+    # combine all the batches and get the mapped classes of the +ve anchor boxes
+    GT_class = GT_class.flatten(start_dim=0, end_dim=1)
+    GT_class_pos = GT_class[positive_anc_ind]
+    
+    # get gt bbox coordinates of the +ve anchor boxes
+    
+    # expand all the gt bboxes to map against every anchor box
+    gt_bboxes_expand = gt_bboxes_all.view(B, 1, N, 4).expand(B, tot_anc_boxes, N, 4)
+    # for every anchor box, consider only the coordinates of the gt bbox it overlaps with the most
+    GT_bboxes = torch.gather(gt_bboxes_expand, -2, max_iou_per_anc_ind.reshape(B, tot_anc_boxes, 1, 1).repeat(1, 1, 1, 4))
+    # combine all the batches and get the mapped gt bbox coordinates of the +ve anchor boxes
+    GT_bboxes = GT_bboxes.flatten(start_dim=0, end_dim=2)
+    GT_bboxes_pos = GT_bboxes[positive_anc_ind]
+    
+    # get coordinates of +ve anc boxes
+    anc_boxes_flat = anc_boxes_all.flatten(start_dim=0, end_dim=-2) # flatten all the anchor boxes
+    positive_anc_coords = anc_boxes_flat[positive_anc_ind]
+    
+    # calculate gt offsets
+    GT_offsets = calc_gt_offsets(positive_anc_coords, GT_bboxes_pos)
+    
+    # get -ve anchors
+    
+    # condition: select the anchor boxes with max iou less than the threshold
+    negative_anc_mask = (max_iou_per_anc < neg_thresh)
+    negative_anc_ind = torch.where(negative_anc_mask)[0]
+    # sample -ve samples to match the +ve samples
+    negative_anc_ind = negative_anc_ind[torch.randint(0, negative_anc_ind.shape[0], (positive_anc_ind.shape[0],))]
+    negative_anc_coords = anc_boxes_flat[negative_anc_ind]
+    
+    return positive_anc_ind, negative_anc_ind, GT_conf_scores, GT_offsets, GT_class_pos, \
+         positive_anc_coords, negative_anc_coords, positive_anc_ind_sep
 
-# plotting helper functions
+# # -------------- Visualization utils ----------------
+
 def display_img(img_data, fig, axes):
     for i, img in enumerate(img_data):
         if type(img) == torch.Tensor:
@@ -295,15 +249,25 @@ def display_img(img_data, fig, axes):
     
     return fig, axes
 
-def display_bbox(bboxes, fig, ax, in_format='xyxy', color='w', line_width=3):
+def display_bbox(bboxes, fig, ax, classes=None, in_format='xyxy', color='w', line_width=3):
     if type(bboxes) == np.ndarray:
         bboxes = torch.from_numpy(bboxes)
+    if classes:
+        assert len(bboxes) == len(classes)
     # convert boxes to xywh format
     bboxes = ops.box_convert(bboxes, in_fmt=in_format, out_fmt='xywh')
+    c = 0
     for box in bboxes:
         x, y, w, h = box.numpy()
+        # display bounding box
         rect = patches.Rectangle((x, y), w, h, linewidth=line_width, edgecolor=color, facecolor='none')
         ax.add_patch(rect)
+        # display category
+        if classes:
+            if classes[c] == 'pad':
+                continue
+            ax.text(x + 5, y + 20, classes[c], bbox=dict(facecolor='yellow', alpha=0.5))
+        c += 1
         
     return fig, ax
 
