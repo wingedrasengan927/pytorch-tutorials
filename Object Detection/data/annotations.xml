@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<annotations>
+  <version>1.1</version>
+  <meta>
+    <task>
+      <id>2</id>
+      <name>article-labelling</name>
+      <size>2</size>
+      <mode>annotation</mode>
+      <overlap>0</overlap>
+      <bugtracker></bugtracker>
+      <created>2022-10-29 14:45:53.093755+00:00</created>
+      <updated>2022-10-29 14:56:10.408986+00:00</updated>
+      <subset>default</subset>
+      <start_frame>0</start_frame>
+      <stop_frame>1</stop_frame>
+      <frame_filter></frame_filter>
+      <segments>
+        <segment>
+          <id>2</id>
+          <start>0</start>
+          <stop>1</stop>
+          <url>http://localhost:8080/api/jobs/2</url>
+        </segment>
+      </segments>
+      <owner>
+        <username>wingedrasengan927</username>
+        <email>ms.neerajkrishna@gmail.com</email>
+      </owner>
+      <assignee>
+        <username>wingedrasengan927</username>
+        <email>ms.neerajkrishna@gmail.com</email>
+      </assignee>
+      <labels>
+        <label>
+          <name>camel</name>
+          <color>#60c080</color>
+          <type>any</type>
+          <attributes>
+          </attributes>
+        </label>
+        <label>
+          <name>bird</name>
+          <color>#404040</color>
+          <type>any</type>
+          <attributes>
+          </attributes>
+        </label>
+      </labels>
+    </task>
+    <dumped>2022-10-29 14:58:01.689218+00:00</dumped>
+  </meta>
+  <image id="0" name="0462.png" width="2040" height="1356">
+    <box label="camel" occluded="0" source="manual" xtl="102.90" ytl="184.30" xbr="1046.05" ybr="996.90" z_order="0">
+    </box>
+    <box label="camel" occluded="0" source="manual" xtl="1302.20" ytl="420.90" xbr="1953.31" ybr="1040.99" z_order="0">
+    </box>
+  </image>
+  <image id="1" name="0896.png" width="2040" height="1356">
+    <box label="bird" occluded="0" source="manual" xtl="1317.20" ytl="588.60" xbr="1806.73" ybr="913.79" z_order="0">
+    </box>
+    <box label="bird" occluded="0" source="manual" xtl="685.43" ytl="626.53" xbr="1334.80" ybr="1261.33" z_order="0">
+    </box>
+    <box label="bird" occluded="0" source="manual" xtl="582.60" ytl="151.68" xbr="1109.69" ybr="603.70" z_order="0">
+    </box>
+    <box label="bird" occluded="0" source="manual" xtl="187.70" ytl="329.54" xbr="866.60" ybr="868.00" z_order="0">
+    </box>
+    <box label="bird" occluded="0" source="manual" xtl="895.90" ytl="515.60" xbr="1367.50" ybr="771.75" z_order="0">
+    </box>
+    <box label="bird" occluded="0" source="manual" xtl="207.33" ytl="912.10" xbr="721.33" ybr="1280.90" z_order="0">
+    </box>
+  </image>
+</annotations>

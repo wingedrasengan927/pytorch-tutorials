@@ -12,7 +12,7 @@ import torch.optim as optim
 
 # -------------- Data Untils -------------------
 
-def parse_annotation(annotation_path, img_size):
+def parse_annotation(annotation_path, image_dir, img_size):
     '''
     Traverse the xml tree, get the annotations, and resize them to the scaled image size
     '''
@@ -23,40 +23,44 @@ def parse_annotation(annotation_path, img_size):
 
     root = tree.getroot()  
     
-    img_path = None
-    # get image path
-    for object_ in root.findall('path'):
-        img_path = object_.text
+    img_paths = []
+    gt_boxes_all = []
+    gt_classes_all = []
+    # get image paths
+    for object_ in root.findall('image'):
+        img_path = os.path.join(image_dir, object_.get("name"))
+        img_paths.append(img_path)
       
-    # get raw image size    
-    for object_ in root.findall('size'):
-        orig_w = int(object_.find("width").text)
-        orig_h = int(object_.find("height").text)
+        # get raw image size    
+        orig_w = int(object_.get("width"))
+        orig_h = int(object_.get("height"))
             
-    # get bboxes        
-    groundtruth_boxes = []
-    for object_ in root.findall('object/bndbox'):
-        xmin = int(object_.find("xmin").text)
-        ymin = int(object_.find("ymin").text)
-        xmax = int(object_.find("xmax").text)
-        ymax = int(object_.find("ymax").text)
+        # get bboxes and their labels   
+        groundtruth_boxes = []
+        groundtruth_classes = []
+        for box_ in object_.findall('box'):
+            xmin = float(box_.get("xtl"))
+            ymin = float(box_.get("ytl"))
+            xmax = float(box_.get("xbr"))
+            ymax = float(box_.get("ybr"))
         
-        # rescale bboxes
-        bbox = torch.Tensor([xmin, ymin, xmax, ymax])
-        bbox[[0, 2]] = bbox[[0, 2]] * img_w/orig_w
-        bbox[[1, 3]] = bbox[[1, 3]] * img_h/orig_h
+            # rescale bboxes
+            bbox = torch.Tensor([xmin, ymin, xmax, ymax])
+            bbox[[0, 2]] = bbox[[0, 2]] * img_w/orig_w
+            bbox[[1, 3]] = bbox[[1, 3]] * img_h/orig_h
         
-        groundtruth_boxes.append(bbox.tolist())
-        
-    # get classes        
-    groundtruth_classes = []
-    for object_ in root.findall('object/name'):
-        groundtruth_classes.append(object_.text)
+            groundtruth_boxes.append(bbox.tolist())
+
+            # get labels
+            label = box_.get("label")
+            groundtruth_classes.append(label)
+
+        gt_boxes_all.append(torch.Tensor(groundtruth_boxes))
+        gt_classes_all.append(groundtruth_classes)
                 
-    return torch.Tensor(groundtruth_boxes), img_path, groundtruth_classes
+    return gt_boxes_all, gt_classes_all, img_paths
 
 # -------------- Prepocessing utils ----------------
-
 
 def calc_gt_offsets(pos_anc_coords, gt_bbox_mapping):
     pos_anc_coords = ops.box_convert(pos_anc_coords, in_fmt='xyxy', out_fmt='cxcywh')
@@ -75,7 +79,6 @@ def calc_gt_offsets(pos_anc_coords, gt_bbox_mapping):
 def gen_anc_centers(out_size):
     out_h, out_w = out_size
     
-    # define mappings from feature space to image
     anc_pts_x = torch.arange(0, out_w) + 0.5
     anc_pts_y = torch.arange(0, out_h) + 0.5
     
@@ -164,7 +167,33 @@ def get_iou_mat(batch_size, anc_boxes_all, gt_bboxes_all):
     return ious_mat
 
 def get_req_anchors(anc_boxes_all, gt_bboxes_all, gt_classes_all, pos_thresh=0.7, neg_thresh=0.2):
+    '''
+    Prepare necessary data required for training
     
+    Input
+    ------
+    anc_boxes_all - torch.Tensor of shape (B, w_amap, h_amap, n_anchor_boxes, 4)
+        all anchor boxes for a batch of images
+    gt_bboxes_all - torch.Tensor of shape (B, max_objects, 4)
+        padded ground truth boxes for a batch of images
+    gt_classes_all - torch.Tensor of shape (B, max_objects)
+        padded ground truth classes for a batch of images
+        
+    Returns
+    ---------
+    positive_anc_ind -  torch.Tensor of shape (n_pos,)
+        flattened positive indices for all the images in the batch
+    negative_anc_ind - torch.Tensor of shape (n_pos,)
+        flattened positive indices for all the images in the batch
+    GT_conf_scores - torch.Tensor of shape (n_pos,), IoU scores of +ve anchors
+    GT_offsets -  torch.Tensor of shape (n_pos, 4),
+        offsets between +ve anchors and their corresponding ground truth boxes
+    GT_class_pos - torch.Tensor of shape (n_pos,)
+        mapped classes of +ve anchors
+    positive_anc_coords - (n_pos, 4) coords of +ve anchors (for visualization)
+    negative_anc_coords - (n_pos, 4) coords of -ve anchors (for visualization)
+    positive_anc_ind_sep - list of indices to keep track of +ve anchors
+    '''
     # get the size and shape parameters
     B, w_amap, h_amap, A, _ = anc_boxes_all.shape
     N = gt_bboxes_all.shape[1] # max number of groundtruth bboxes in a batch
@@ -249,7 +278,7 @@ def display_img(img_data, fig, axes):
     
     return fig, axes
 
-def display_bbox(bboxes, fig, ax, classes=None, in_format='xyxy', color='w', line_width=3):
+def display_bbox(bboxes, fig, ax, classes=None, in_format='xyxy', color='y', line_width=3):
     if type(bboxes) == np.ndarray:
         bboxes = torch.from_numpy(bboxes)
     if classes:
@@ -275,7 +304,7 @@ def display_grid(x_points, y_points, fig, ax, special_point=None):
     # plot grid
     for x in x_points:
         for y in y_points:
-            ax.scatter(x, y, color="yellow", marker='+')
+            ax.scatter(x, y, color="w", marker='+')
             
     # plot a special point we want to emphasize on the grid
     if special_point:
